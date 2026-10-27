@@ -22,4 +22,3 @@ if not st.session_state.authenticated:
 with open(os.path.join(os.path.dirname(__file__),'revisor.py'),encoding='utf-8') as f:
     code=f.read().replace("st.set_page_config(page_title='Revisor de cuentas de cobro',layout='wide')",'')
 exec(compile(code,'revisor.py','exec'),{'__name__':'__main__','__file__':__file__})
-le__':__file__})
