@@ -11,9 +11,9 @@ if not st.session_state.authenticated:
         password=st.text_input('Contraseña',type='password')
         login=st.form_submit_button('Ingresar')
     if login:
-       expected_user = st.secrets.get("REVISOR_USER", "")
-       expected_pass = st.secrets.get("REVISOR_PASSWORD", "")
-        if expected_user and expected_pass and hmac.compare_digest(username,expected_user) and hmac.compare_digest(password,expected_pass):
+     expected_user = st.secrets.get("REVISOR_USER", "")
+        expected_pass = st.secrets.get("REVISOR_PASSWORD", "")
+        if expected_user and expected_pass and hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_pass):
             st.session_state.authenticated=True
             st.rerun()
         else:
