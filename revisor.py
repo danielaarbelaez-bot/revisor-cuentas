@@ -1,99 +1,403 @@
-import streamlit as st, pandas as pd, re, io, zipfile, unicodedata, datetime, holidays
+
+import io
+import re
+import zipfile
+import unicodedata
+import datetime as dt
+import pandas as pd
+import streamlit as st
+import holidays
 from docx import Document
 from pypdf import PdfReader
-from rapidfuzz import fuzz
-st.set_page_config(page_title='Revisor de cuentas de cobro',layout='wide')
-st.title('Revisor de cuentas de cobro | Defensoría del Pueblo')
-st.caption('Prototipo local. No cargue documentos con datos personales en un servidor público.')
-def norm(v):
- s=unicodedata.normalize('NFKD',str(v or ''))
- return ''.join(c for c in s if not unicodedata.combining(c)).upper().strip()
-def textfile(name,b):
- ext=name.lower().split('.')[-1]
- try:
-  if ext=='pdf':return '\n'.join(p.extract_text() or '' for p in PdfReader(io.BytesIO(b)).pages)
-  if ext=='docx':
-   d=Document(io.BytesIO(b));return '\n'.join([p.text for p in d.paragraphs]+[' '.join(c.text for c in r.cells) for t in d.tables for r in t.rows])
-  if ext in ('xlsx','xlsm'):
-   x=pd.read_excel(io.BytesIO(b),sheet_name=None,header=None,dtype=str)
-   return '\n'.join(str(v) for df in x.values() for v in df.fillna('').values.flatten() if str(v).strip())
- except Exception as e:return '[NO SE PUDO EXTRAER: '+str(e)+']'
- return '[FORMATO NO SOPORTADO]'
-def unpack(items):
- out=[]
- for f in items:
-  b=f.getvalue()
-  if f.name.lower().endswith('.zip'):
-   try:
-    with zipfile.ZipFile(io.BytesIO(b)) as z:
-     for n in z.namelist():
-      if not n.endswith('/') and not n.startswith('__MACOSX') and not n.startswith('/') and '..' not in n.split('/') and n.lower().endswith(('.pdf','.docx','.xlsx','.xlsm')) and z.getinfo(n).file_size<25_000_000:out.append((n,z.read(n)))
-   except Exception as e:st.error(f'ZIP no válido: {e}')
-  else:out.append((f.name,b))
- return out
+
+st.title("Revisor de cuentas de cobro | Demostración")
+st.warning(
+    "Solo para pruebas con datos ficticios. "
+    "No cargue documentos institucionales ni datos personales reales."
+)
+
+def normalizar(valor):
+    texto = unicodedata.normalize("NFKD", str(valor or ""))
+    return "".join(
+        c for c in texto if not unicodedata.combining(c)
+    ).upper().strip()
+
 @st.cache_data
-def master(b):
- df=pd.read_excel(io.BytesIO(b),sheet_name='FINANCIERA');df.columns=[norm(c) for c in df.columns]
- return df.dropna(subset=['NOMBRE']).copy()
-base=st.file_uploader('Base maestra CONTRATISTAS 2026.xlsx',type=['xlsx'],key='base')
-period=st.date_input('Mes de la cuenta (seleccione cualquier día del mes)',value=datetime.date(2026,10,1))
-files=st.file_uploader('Cargue F62 (Word), F68 (Excel), planilla (PDF), soportes (PDF), matrices (Excel) o ZIP',type=['zip','docx','xlsx','xlsm','pdf'],accept_multiple_files=True)
-if base:
- df=master(base.getvalue()); names=df['NOMBRE'].astype(str).tolist(); chosen=st.selectbox('Contratista',names)
- row=df[df['NOMBRE']==chosen].iloc[0]
- st.write('Contrato:',row.get('NO. CONTRATO',''), '| Regional:',row.get('REGIONAL',''), '| Proyecto:',row.get('PROYECTO',''))
-else:st.info('Cargue la base maestra para habilitar el cotejo de identidad y contrato.')
-if st.button('Analizar documentos',type='primary'):
- if not files:st.warning('Debe adjuntar documentos.');st.stop()
- docs=unpack(files); results=[]; texts={}
- def flag(doc,level,msg):results.append({'Documento':doc,'Prioridad':level,'Observación':msg})
- for n,b in docs:
-  t=textfile(n,b);texts[n]=t;lo=norm(n);nt=norm(t)
-  if t.startswith('[NO SE PUDO'):flag(n,'Revisión manual','No se pudo leer el contenido; verificar archivo, contraseña o escaneo.')
-  if re.search(r'F68',lo) and not re.search(r'\bV\s*3\b|VERSION\s*3|VERSION\s*03',nt+ ' '+lo):flag(n,'Revisión manual','No se pudo confirmar que el F68 corresponda a la versión 3.')
-  if re.search(r'F62|F68',lo):
-   if 'LISA CRISTINA' not in nt:flag(n,'Revisión manual','Verificar el nombre de la supervisora Dra. Lisa Cristina Gómez.')
-   if 'NATALIA POVEDA' in nt or 'YINA NATALIA' in nt:flag(n,'Corregir','Revisar nombre de supervisora: no debe aparecer la Dra. Natalia como supervisora.')
-   if not re.search(r'FIRMA|FIRMADO|SUSCRIBE',nt):flag(n,'Revisión manual','No se identificó texto relativo a firma; comprobar visualmente la firma de la contratista.')
-  if 'CASO' in lo and n.lower().endswith(('.xlsx','.xlsm')):
-   for word in ['NOMBRE','APELLIDO','CEDULA','DOCUMENTO','TELEFONO','CELULAR','CORREO','DIRECCION']:
-    if word in nt:flag(n,'Privacidad','Revisar y eliminar columna/casillas de '+word.lower()+' con datos identificables de víctimas.')
-  if 'PYD' in lo and not n.lower().endswith(('.xlsx','.xlsm')):flag(n,'Corregir','La matriz PYD debe entregarse en Excel.')
-  if re.search(r'F62|F68',lo):
-   if base:
-    if norm(row.get('NO. CONTRATO','')) not in nt:flag(n,'Corregir','Verificar número de contrato frente a la base maestra.')
-    ced=re.sub(r'\D','',str(row.get('CEDULA','')))
-    if ced and ced not in re.sub(r'\D','',t):flag(n,'Revisión manual','No se pudo localizar la cédula de la contratista en el documento.')
-   if 'OCTUBRE' in nt and period.month!=10:flag(n,'Revisión manual','El documento menciona octubre; comprobar que corresponde al período seleccionado.')
-   for k in [1,2,4,5,6,7]:
-    if not re.search(r'(?m)(?:^|\n)\s*'+str(k)+r'\s*[.)-]',t):flag(n,'Revisión manual',f'No se pudo identificar claramente la obligación {k}; verificar estructura y actividad.')
-  if 'PLANILLA' in lo and not n.lower().endswith('.pdf'):flag(n,'Corregir','La planilla de seguridad social debe enviarse en PDF.')
-  if 'PLANILLA' in lo and n.lower().endswith('.pdf'):
-   if '2360000' not in re.sub(r'[^0-9]','',t):flag(n,'Revisión manual','No se pudo confirmar IBC de $2.360.000; verificar liquidación, novedades y período de cotización.')
-   flag(n,'Revisión manual','Verificar período de cotización, fecha de pago y condición de pago anticipado; no basta el texto extraído para validarlo.')
-  if n.lower().endswith('.pdf') and len(t.strip())<80:flag(n,'Revisión manual','PDF posiblemente escaneado: requiere revisión visual y de anonimización.')
- kinds={'F62':any('F62' in norm(n) for n in texts),'F68':any('F68' in norm(n) for n in texts),'planilla PDF':any('PLANILLA' in norm(n) and n.lower().endswith('.pdf') for n in texts),'matriz de casos':any('CASO' in norm(n) for n in texts),'matriz PYD Excel':any('PYD' in norm(n) and n.lower().endswith(('.xlsx','.xlsm')) for n in texts)}
- for k,ok in kinds.items():
-  if not ok:flag('Expediente','Faltante',f'No se identificó {k}; verificar si el archivo tiene otro nombre.')
- yy,mm=period.year,period.month
- nxt=datetime.date(yy+int(mm==12),mm%12+1,1);co=holidays.country_holidays('CO',years=[nxt.year]);expected=nxt
- while expected.weekday()>=5 or expected in co:expected+=datetime.timedelta(days=1)
- last=nxt-datetime.timedelta(days=1)
- st.info(f'Período esperado: 01/{mm:02d}/{yy} a {last:%d/%m/%Y}. Fecha de elaboración esperada: {expected:%d/%m/%Y} (primer día hábil colombiano).')
- if mm==10 and yy==2026:st.caption('Para octubre de 2026: 3 de noviembre de 2026.')
- for n,t in texts.items():
-  if 'F62' in norm(n) or 'F68' in norm(n):
-   if str(expected.day) not in t:flag(n,'Revisión manual',f'Verificar fecha de elaboración {expected:%d/%m/%Y}; no se pudo confirmar automáticamente.')
- f62=' '.join(t for n,t in texts.items() if 'F62' in norm(n));f68=' '.join(t for n,t in texts.items() if 'F68' in norm(n))
- if f62 and f68:
-  for k in [1,2,4,5,6,7]:
-   a=re.search(r'(?m)^\s*'+str(k)+r'\s*[.)-]\s*(.{20,300})',f62);b=re.search(r'(?m)^\s*'+str(k)+r'\s*[.)-]\s*(.{20,300})',f68)
-   if a and b and fuzz.ratio(norm(a.group(1)),norm(b.group(1)))<70:flag('F62 y F68','Corregir',f'Obligación {k}: posible diferencia entre actividades registradas en F62 y F68; cotejar ambos documentos.')
- if not results:flag('Expediente','Revisión manual','Sin hallazgos por reglas automáticas; verificar soportes, firmas, datos personales y correspondencia contractual.')
- report=pd.DataFrame(results).drop_duplicates();st.subheader('Hallazgos');st.dataframe(report,use_container_width=True,hide_index=True)
- st.download_button('Descargar informe CSV',report.to_csv(index=False).encode('utf-8-sig'),'hallazgos.csv','text/csv')
- notes='\n\n'.join(f'{name}:\n'+'\n'.join('- '+x for x in group['Observación']) for name,group in report.groupby('Documento',sort=False))
- email='Cordial saludo,\n\nDe acuerdo con la revisión realizada, agradezco verificar y efectuar los siguientes ajustes:\n\n'+notes+'\n\nQuedo atenta al envío de la documentación ajustada.\n\nCordialmente,'
- st.subheader('Borrador de observaciones');st.text_area('Copiar al correo',email,height=320)
- st.download_button('Descargar observaciones',email,'observaciones.txt')
- st.warning('Este prototipo no certifica anonimización, autenticidad de firmas, funcionamiento de macros, concordancia íntegra de obligaciones ni pago anticipado. Todos requieren controles adicionales.')
+def base_demo():
+    return pd.DataFrame([
+        {
+            "NOMBRE": "ANA MARIA PRUEBA",
+            "CEDULA": "999000001",
+            "CONTRATO": "DEF-DEMO-001",
+            "REGIONAL": "ANTIOQUIA",
+            "PROYECTO": "EXIGIBILIDAD",
+            "HONORARIOS": 5900000
+        },
+        {
+            "NOMBRE": "LAURA PATRICIA EJEMPLO",
+            "CEDULA": "999000002",
+            "CONTRATO": "DEF-DEMO-002",
+            "REGIONAL": "QUINDIO",
+            "PROYECTO": "VICTIMAS",
+            "HONORARIOS": 5900000
+        }
+    ])
+
+def documentos(archivos):
+    salida = []
+    for archivo in archivos:
+        contenido = archivo.getvalue()
+        if archivo.name.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(contenido)) as z:
+                    for info in z.infolist():
+                        nombre = info.filename
+                        if (
+                            info.is_dir()
+                            or ".." in nombre.split("/")
+                            or nombre.startswith("/")
+                            or info.file_size > 20000000
+                        ):
+                            continue
+                        if nombre.lower().endswith(
+                            (".pdf", ".docx", ".xlsx", ".xlsm")
+                        ):
+                            salida.append((nombre, z.read(info)))
+            except (zipfile.BadZipFile, ValueError):
+                st.error("No se pudo abrir uno de los ZIP.")
+        else:
+            salida.append((archivo.name, contenido))
+    return salida
+
+def extraer(nombre, contenido):
+    try:
+        extension = nombre.lower().rsplit(".", 1)[-1]
+        if extension == "pdf":
+            return "\n".join(
+                p.extract_text() or ""
+                for p in PdfReader(io.BytesIO(contenido)).pages
+            )
+        if extension == "docx":
+            d = Document(io.BytesIO(contenido))
+            partes = [p.text for p in d.paragraphs]
+            partes += [
+                c.text
+                for t in d.tables
+                for fila in t.rows
+                for c in fila.cells
+            ]
+            return "\n".join(partes)
+        if extension in ("xlsx", "xlsm"):
+            hojas = pd.read_excel(
+                io.BytesIO(contenido),
+                sheet_name=None,
+                header=None,
+                dtype=str
+            )
+            return "\n".join(
+                str(v)
+                for hoja in hojas.values()
+                for v in hoja.fillna("").to_numpy().flatten()
+                if str(v).strip()
+            )
+    except Exception:
+        return ""
+    return ""
+
+def identificar(textos, base):
+    contenido = normalizar("\n".join(textos.values()))
+    resultados = []
+
+    for _, r in base.iterrows():
+        pruebas = []
+        if normalizar(r["CONTRATO"]) in contenido:
+            pruebas.append("contrato")
+        if re.search(
+            r"(?<!\d)" + re.escape(str(r["CEDULA"])) + r"(?!\d)",
+            contenido
+        ):
+            pruebas.append("cédula")
+        if normalizar(r["NOMBRE"]) in contenido:
+            pruebas.append("nombre")
+        if pruebas:
+            resultados.append((len(pruebas), r, pruebas))
+
+    resultados.sort(key=lambda x: x[0], reverse=True)
+
+    if not resultados:
+        return None, "No se encontró coincidencia con la base ficticia."
+
+    mejor = resultados[0]
+    if mejor[0] < 2 or (
+        len(resultados) > 1 and resultados[1][0] == mejor[0]
+    ):
+        return None, (
+            "Identificación no concluyente. "
+            "Se requieren dos datos coincidentes y un resultado único."
+        )
+
+    return mejor[1], (
+        "Coincidencia preliminar mediante "
+        + ", ".join(mejor[2]) + "."
+    )
+
+st.success(
+    "Base ficticia incorporada automáticamente. "
+    "No necesitas subir un Excel."
+)
+
+with st.expander("Ver contratistas ficticias para la prueba"):
+    st.dataframe(
+        base_demo(),
+        hide_index=True,
+        use_container_width=True
+    )
+
+periodo = st.date_input(
+    "Mes de la cuenta",
+    value=dt.date(2026, 10, 1)
+)
+
+archivos = st.file_uploader(
+    "Cargar F62, F68, planilla, matrices o ZIP de demostración",
+    type=["pdf", "docx", "xlsx", "xlsm", "zip"],
+    accept_multiple_files=True
+)
+
+if st.button(
+    "Revisar cuenta automáticamente",
+    type="primary",
+    use_container_width=True
+):
+    if not archivos:
+        st.warning("Primero carga documentos de demostración.")
+        st.stop()
+
+    contenidos = documentos(archivos)
+    if not contenidos:
+        st.error("No se encontraron archivos compatibles.")
+        st.stop()
+
+    textos = {
+        n: extraer(n, b)
+        for n, b in contenidos
+    }
+
+    contratista, mensaje = identificar(textos, base_demo())
+
+    if contratista is None:
+        st.warning(mensaje)
+    else:
+        st.success(
+            "Contratista identificada: "
+            + str(contratista["NOMBRE"])
+        )
+        st.caption(
+            "Contrato: " + str(contratista["CONTRATO"])
+            + " | Regional: " + str(contratista["REGIONAL"])
+            + " | Proyecto: " + str(contratista["PROYECTO"])
+        )
+        st.caption(mensaje)
+
+    hallazgos = []
+
+    def agregar(documento, tipo, observacion):
+        hallazgos.append({
+            "Documento": documento,
+            "Estado": tipo,
+            "Observación": observacion
+        })
+
+    nombres = [normalizar(n) for n, _ in contenidos]
+
+    requeridos = {
+        "F62": any("F62" in n for n in nombres),
+        "F68": any("F68" in n for n in nombres),
+        "Planilla PDF": any(
+            "PLANILLA" in n and n.endswith(".PDF")
+            for n in nombres
+        ),
+        "Matriz de casos": any(
+            "CASO" in n and n.endswith((".XLSX", ".XLSM"))
+            for n in nombres
+        ),
+        "Matriz PYD Excel": any(
+            "PYD" in n and n.endswith((".XLSX", ".XLSM"))
+            for n in nombres
+        )
+    }
+
+    for etiqueta, existe in requeridos.items():
+        if not existe:
+            agregar(
+                "Expediente",
+                "Verificar",
+                "No se identificó " + etiqueta
+                + ". Revisar si el archivo tiene otro nombre."
+            )
+
+    for nombre, contenido in contenidos:
+        texto = textos[nombre]
+        clave = normalizar(nombre)
+        plano = normalizar(texto)
+
+        if not texto.strip():
+            agregar(
+                nombre,
+                "Revisión manual",
+                "No se pudo extraer texto; puede ser un escaneo "
+                "o un archivo protegido."
+            )
+
+        if "F68" in clave and not re.search(
+            r"\bV\s*3\b|VERSION\s*0?3",
+            plano + " " + clave
+        ):
+            agregar(
+                nombre,
+                "Revisión manual",
+                "No se pudo confirmar la versión V3 del F68."
+            )
+
+        if "F62" in clave or "F68" in clave:
+            if "LISA CRISTINA" not in plano:
+                agregar(
+                    nombre,
+                    "Revisión manual",
+                    "Verificar que la supervisora registrada sea "
+                    "la Dra. Lisa Cristina Gómez."
+                )
+
+            if "YINA NATALIA" in plano:
+                agregar(
+                    nombre,
+                    "Corregir",
+                    "Revisar el nombre de la supervisora registrado."
+                )
+
+            agregar(
+                nombre,
+                "Revisión manual",
+                "Comprobar visualmente la firma de la contratista "
+                "y la correspondencia de obligaciones y soportes."
+            )
+
+            if (
+                contratista is not None
+                and normalizar(contratista["CONTRATO"]) not in plano
+            ):
+                agregar(
+                    nombre,
+                    "Corregir",
+                    "No se encontró el contrato esperado "
+                    "en el texto extraído."
+                )
+
+        if "CASO" in clave and clave.endswith((".XLSX", ".XLSM")):
+            for campo in [
+                "NOMBRE", "APELLIDO", "CEDULA",
+                "TELEFONO", "CORREO", "DIRECCION"
+            ]:
+                if campo in plano:
+                    agregar(
+                        nombre,
+                        "Privacidad",
+                        "Revisar posibles columnas con "
+                        + campo.lower()
+                        + " de víctimas; eliminar datos identificables."
+                    )
+
+        if "PLANILLA" in clave and clave.endswith(".PDF"):
+            if "2360000" not in re.sub(r"\D", "", texto):
+                agregar(
+                    nombre,
+                    "Revisión manual",
+                    "No se confirmó IBC de $2.360.000; "
+                    "comprobar novedades y liquidación."
+                )
+
+            agregar(
+                nombre,
+                "Revisión manual",
+                "Comprobar fecha de pago y período de cotización; "
+                "no se validan automáticamente."
+            )
+
+    siguiente = dt.date(
+        periodo.year + (periodo.month == 12),
+        periodo.month % 12 + 1,
+        1
+    )
+
+    ultimo = siguiente - dt.timedelta(days=1)
+    festivos = holidays.country_holidays(
+        "CO",
+        years=[siguiente.year]
+    )
+
+    fecha = siguiente
+    while fecha.weekday() >= 5 or fecha in festivos:
+        fecha += dt.timedelta(days=1)
+
+    st.info(
+        f"Período esperado: 01/{periodo.month:02d}/{periodo.year} "
+        f"a {ultimo:%d/%m/%Y}. "
+        f"Fecha de elaboración: {fecha:%d/%m/%Y}."
+    )
+
+    if not hallazgos:
+        agregar(
+            "Expediente",
+            "Revisión manual",
+            "No se encontraron alertas básicas; "
+            "falta verificar integralmente el expediente."
+        )
+
+    tabla = pd.DataFrame(hallazgos).drop_duplicates()
+
+    st.subheader("Observaciones preliminares")
+    st.dataframe(
+        tabla,
+        hide_index=True,
+        use_container_width=True
+    )
+
+    correo = (
+        "Cordial saludo,\n\n"
+        "De acuerdo con la revisión realizada, "
+        "agradezco verificar los siguientes puntos:\n\n"
+    )
+
+    for documento, grupo in tabla.groupby(
+        "Documento",
+        sort=False
+    ):
+        correo += (
+            documento + "\n"
+            + "\n".join(
+                "- " + x for x in grupo["Observación"]
+            )
+            + "\n\n"
+        )
+
+    correo += (
+        "Quedo atenta al envío de la documentación ajustada."
+        "\n\nCordialmente,"
+    )
+
+    st.text_area(
+        "Borrador para Outlook",
+        correo,
+        height=280
+    )
+
+    st.download_button(
+        "Descargar observaciones",
+        correo,
+        "observaciones_demo.txt"
+    )
+
+    st.warning(
+        "Demostración: no certifica firmas, macros, anonimización, "
+        "pago anticipado ni coincidencia completa de obligaciones."
+    )
