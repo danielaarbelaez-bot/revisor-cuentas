@@ -12,7 +12,7 @@ from docx import Document
 from pypdf import PdfReader
 from openpyxl import load_workbook
 
-st.title('Revisor de cuentas de cobro | Revisión consolidada | Versión de entrega')
+st.title('Revisor de cuentas de cobro | Versión final de pruebas')
 st.warning('Solo para pruebas con datos ficticios. No cargue documentos institucionales ni datos personales reales.')
 
 MAX_FILE = 20 * 1024 * 1024
@@ -199,7 +199,7 @@ def f68_campos(datos):
         return {}
     v = lambda c: valor_celda(datos, c)
     return {
-        'contrato': v('K17'), 'nombre': v('L19'), 'cedula': v('AB19'),
+        'contrato': v('K17') or v('L17'), 'nombre': v('L19'), 'cedula': v('AB19'),
         'inicio': fecha_partes(v('N13'),v('P13'),v('T13')),
         'fin': fecha_partes(v('X13'),v('Z13'),v('AD13')),
         'mes_seguridad': v('AC102'),
@@ -264,7 +264,7 @@ def campo_valido(campo, valor):
     if valor is None or es_marcador(valor):
         return False
     v = limpiar_campo(valor)
-    if re.search(r'#{2,}|\bEJEMPLO\b|\bFICTICI[OA]\b|\bPRUEBA\b', v):
+    if re.search(r'#{2,}|\bFICTICI[OA]\b', v):
         return False
     if campo == 'cedula':
         return len(re.sub(r'\D','',str(valor))) >= 6
@@ -289,7 +289,7 @@ def cotejar_campos(nombre62, datos62, bytes62, nombre68, datos68, contratista, p
     a, b = f62_campos_bytes(bytes62), f68_campos(datos68)
     if not a or not b:
         agregar('Comparación F62–F68', 'Revisión manual',
-                'No fue posible leer ambos formatos con la estructura oficial. El cotejo de campos queda pendiente.')
+                'Los archivos no corresponden a las estructuras oficiales F62 DOCX y F68 XLSX o no pudieron leerse. No se pueden concluir diferencias; probar con las plantillas de ejemplo incluidas.')
         return
     for campo, titulo in [('contrato','número de contrato'), ('nombre','nombre de la contratista'),
                           ('cedula','documento de identidad')]:
@@ -403,7 +403,7 @@ if st.button('Revisar cuenta automáticamente', type='primary', use_container_wi
             if datos['version_f68'] is None:
                 agregar(nombre, 'Revisión manual', 'No se encontró la celda de versión AA4 en la hoja «Formulario para pagos»; comprobar plantilla.')
             elif not re.search(r'(?<!\d)0?3(?:\.0)?(?!\d)', str(datos['version_f68'])):
-                agregar(nombre, 'Corregir', f'La versión indicada en AA4 no corresponde a la versión 3 esperada.', 'Formulario para pagos!AA4')
+                agregar(nombre, 'Corregir', f'El campo AA4 indica una versión distinta de la versión 3 del F68; actualizar al formato vigente tras confirmar el requisito institucional.', 'Formulario para pagos!AA4')
         if 'F62' in clave or 'F68' in clave:
             agregar(nombre, 'Revisión manual', 'Comprobar firmas y correspondencia entre obligaciones, actividades y soportes; no se certifican automáticamente.')
             if contratista is not None and normalizar(contratista['CONTRATO']) not in plano:
@@ -479,4 +479,4 @@ if st.button('Revisar cuenta automáticamente', type='primary', use_container_wi
     st.text_area('Correo único para Outlook — solo correcciones comprobadas', correo, height=280)
     st.download_button('Descargar correo para Outlook', correo, 'correo_correcciones.txt', mime='text/plain', disabled=correcciones.empty)
     st.caption('No se envían automáticamente correos. Las alertas de privacidad se excluyen del correo hasta confirmar que corresponden a datos personales que deben anonimizarse.')
-    st.warning('Revisión consolidada | Versión de entrega: coteja campos estructurados cuando se usan las plantillas oficiales. No certifica anonimización completa, firmas, macros, pagos ni obligaciones. No apta para expedientes reales.')
+    st.warning('Versión final de pruebas: coteja campos estructurados cuando se usan las plantillas oficiales. No certifica anonimización completa, firmas, macros, pagos ni obligaciones. No apta para expedientes reales.')
