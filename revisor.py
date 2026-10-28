@@ -12,7 +12,7 @@ from docx import Document
 from pypdf import PdfReader
 from openpyxl import load_workbook
 
-st.title('Revisor de cuentas de cobro | Demostración V3')
+st.title('Revisor de cuentas de cobro | Demostración V4')
 st.warning('Solo para pruebas con datos ficticios. No cargue documentos institucionales ni datos personales reales.')
 
 MAX_FILE = 20 * 1024 * 1024
@@ -167,6 +167,116 @@ def riesgos_privacidad(nombre, datos, es_matriz):
     return avisos[:35]
 
 
+
+# V4: cotejo conservador de campos identificables. No inventa valores faltantes.
+MESES = {normalizar(m): i for i, m in enumerate(['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'], 1)}
+
+
+def fecha_partes(dia, mes, anio):
+    try:
+        m = MESES.get(normalizar(mes), None)
+        if m is None and str(mes).strip().isdigit():
+            m = int(mes)
+        return dt.date(int(str(anio).strip()), m, int(str(dia).strip()))
+    except (ValueError, TypeError):
+        return None
+
+
+def valor_celda(datos, coord, hoja='Formulario para pagos'):
+    for nombre, celdas in datos['hojas'].items():
+        if normalizar(nombre) == normalizar(hoja):
+            return celdas.get(coord)
+    return None
+
+
+def limpiar_campo(valor):
+    v = normalizar(valor)
+    return re.sub(r'\s+', ' ', v).strip()
+
+
+def f68_campos(datos):
+    if not any(normalizar(h) == 'FORMULARIO PARA PAGOS' for h in datos['hojas']):
+        return {}
+    v = lambda c: valor_celda(datos, c)
+    return {
+        'contrato': v('K17'), 'nombre': v('L19'), 'cedula': v('AB19'),
+        'inicio': fecha_partes(v('N13'),v('P13'),v('T13')),
+        'fin': fecha_partes(v('X13'),v('Z13'),v('AD13')),
+        'mes_seguridad': v('AC102'),
+        'salud': v('Z106'), 'pension': v('Z108'), 'arl': v('Z110'),
+        'supervisor': v('J49'), 'valor_total': v('J41'),
+    }
+
+
+def f62_campos_bytes(contenido):
+    try:
+        doc = Document(io.BytesIO(contenido))
+        # Estructura basada en la tabla de información básica del formato F62 V2.
+        tabla = next((t for t in doc.tables if len(t.rows) > 13 and
+                       'INFORMACION BASICA' in normalizar(t.rows[0].cells[0].text)), None)
+        if tabla is None:
+            return {}
+        def dato(fila):
+            if len(tabla.rows) <= fila:
+                return None
+            celdas = tabla.rows[fila].cells
+            for c in celdas[4:]:
+                if c.text.strip():
+                    return c.text.strip()
+            return None
+        return {'contrato': dato(4), 'nombre': dato(5), 'cedula': dato(6),
+                'supervisor': dato(13), 'valor_total': dato(10),
+                'periodo_texto': dato(2)}
+    except Exception:
+        return {}
+
+
+def cotejar_campos(nombre62, datos62, bytes62, nombre68, datos68, contratista, periodo, agregar):
+    a, b = f62_campos_bytes(bytes62), f68_campos(datos68)
+    if not a or not b:
+        agregar('Comparación F62–F68', 'Revisión manual',
+                'No fue posible leer ambos formatos con la estructura oficial. El cotejo de campos queda pendiente.')
+        return
+    for campo, titulo in [('contrato','número de contrato'), ('nombre','nombre de la contratista'),
+                          ('cedula','documento de identidad')]:
+        va, vb = a.get(campo), b.get(campo)
+        if va and vb and not es_marcador(va) and not es_marcador(vb):
+            if campo == 'cedula':
+                coinciden = re.sub(r'\D','',str(va)) == re.sub(r'\D','',str(vb))
+            else:
+                coinciden = limpiar_campo(va) == limpiar_campo(vb)
+            if not coinciden:
+                agregar('Comparación F62–F68', 'Corregir',
+                        f'El {titulo} no coincide entre F62 y F68. Ajustar el dato incorrecto para que ambos formatos sean consistentes, previa verificación del contrato.',
+                        'F62: información básica / F68: formulario para pagos')
+        else:
+            agregar('Comparación F62–F68', 'Revisión manual',
+                    f'No se pudo cotejar el {titulo} en ambos formatos; verificar los campos correspondientes.')
+    inicio, fin = b.get('inicio'), b.get('fin')
+    esperado_inicio = dt.date(periodo.year,periodo.month,1)
+    esperado_fin = dt.date(periodo.year + (periodo.month == 12),periodo.month % 12 + 1,1) - dt.timedelta(days=1)
+    if inicio and fin:
+        if inicio != esperado_inicio or fin != esperado_fin:
+            agregar(nombre68,'Corregir',
+                    f'El período del F68 ({inicio:%d/%m/%Y} a {fin:%d/%m/%Y}) difiere del mes seleccionado ({esperado_inicio:%d/%m/%Y} a {esperado_fin:%d/%m/%Y}). Verificar el período aplicable y ajustar.',
+                    'Formulario para pagos, fila 13')
+    else:
+        agregar(nombre68,'Revisión manual','No se pudo interpretar el período completo del F68 en la fila 13.')
+    periodo62 = normalizar(a.get('periodo_texto') or '')
+    if periodo62 and 'DEL' in periodo62 and not re.search(r'\b\d{1,2}\b',periodo62):
+        agregar(nombre62,'Revisión manual','El período del F62 no tiene fechas legibles para cotejar.', 'Información básica, período de reporte')
+    mes_ss = b.get('mes_seguridad')
+    if mes_ss and normalizar(mes_ss) in MESES and MESES[normalizar(mes_ss)] != periodo.month:
+        agregar(nombre68,'Corregir',
+                'El mes de aportes de seguridad social registrado en F68 no corresponde al mes seleccionado. Verificar el período cotizado y corregir el campo si procede.',
+                'Formulario para pagos!AC102')
+    elif not mes_ss:
+        agregar(nombre68,'Revisión manual','No se pudo comprobar el mes de aportes de seguridad social en F68.', 'Formulario para pagos!AC102')
+    # No comparar honorarios o aportes cuando el documento no permite un cotejo inequívoco.
+    agregar('Comparación F62–F68','Revisión manual',
+            'Revisar valores de honorarios, aportes, obligaciones y soportes con documentos originales; el sistema no dispone de una verificación concluyente.')
+
+
 st.success('Base ficticia incorporada automáticamente. No necesitas subir un Excel.')
 with st.expander('Ver contratistas ficticias para la prueba'):
     st.dataframe(base_demo(), hide_index=True, use_container_width=True)
@@ -224,7 +334,7 @@ if st.button('Revisar cuenta automáticamente', type='primary', use_container_wi
             f68.append((nombre, datos))
             if datos['version_f68'] is None:
                 agregar(nombre, 'Revisión manual', 'No se encontró la celda de versión AA4 en la hoja «Formulario para pagos»; comprobar plantilla.')
-            elif str(datos['version_f68']).strip() not in {'3', '03', '3.0'}:
+            elif not re.search(r'(?<!\d)0?3(?:\.0)?(?!\d)', str(datos['version_f68'])):
                 agregar(nombre, 'Corregir', f'La versión indicada en AA4 no corresponde a la versión 3 esperada.', 'Formulario para pagos!AA4')
         if 'F62' in clave or 'F68' in clave:
             agregar(nombre, 'Revisión manual', 'Comprobar firmas y correspondencia entre obligaciones, actividades y soportes; no se certifican automáticamente.')
@@ -240,14 +350,12 @@ if st.button('Revisar cuenta automáticamente', type='primary', use_container_wi
     if len(f62) == 1 and len(f68) == 1:
         nombre62, datos62 = f62[0]
         nombre68, datos68 = f68[0]
-        texto62, texto68 = normalizar(datos62['texto']), normalizar(datos68['texto'])
-        if contratista is not None:
-            contrato = normalizar(contratista['CONTRATO'])
-            if contrato in texto62 and contrato in texto68:
-                st.caption('Coincidencia preliminar: número de contrato presente en ambos formatos.')
-            else:
-                agregar('Comparación F62–F68', 'Verificar', 'El número de contrato no pudo confirmarse en ambos formatos.')
-        agregar('Comparación F62–F68', 'Revisión manual', 'Pendiente cotejo estructurado de períodos, valores, obligaciones y pagos con las celdas/campos específicos de las plantillas.')
+        bytes62 = next((b for n,b in contenidos if n == nombre62), None)
+        if nombre62.lower().endswith('.docx') and bytes62:
+            cotejar_campos(nombre62, datos62, bytes62, nombre68, datos68, contratista, periodo, agregar)
+        else:
+            agregar('Comparación F62–F68','Revisión manual',
+                    'El cotejo estructurado de F62 requiere un archivo Word DOCX con la plantilla oficial.')
     elif len(f62) > 1 or len(f68) > 1:
         agregar('Comparación F62–F68', 'Verificar', 'Se recibieron varios F62 o F68; seleccionar el par correspondiente antes de comparar.')
 
@@ -300,6 +408,6 @@ if st.button('Revisar cuenta automáticamente', type='primary', use_container_wi
         correo += 'Agradezco remitir la documentación ajustada para continuar con el trámite.\n\n'
     correo += 'Cordialmente,'
     st.text_area('Correo único para Outlook — solo correcciones comprobadas', correo, height=280)
-    st.download_button('Descargar correo para Outlook', correo, 'correo_correcciones_demo_v3.txt', mime='text/plain')
+    st.download_button('Descargar correo para Outlook', correo, 'correo_correcciones_demo_v4.txt', mime='text/plain')
     st.caption('No se envían automáticamente correos. Las alertas de privacidad se excluyen del correo hasta confirmar que corresponden a datos personales que deben anonimizarse.')
-    st.warning('Demostración: no certifica anonimización completa, firmas, macros, pagos, ni concordancia integral de obligaciones. No apta para expedientes reales.')
+    st.warning('Demostración V4: coteja campos estructurados cuando se usan las plantillas oficiales. No certifica anonimización completa, firmas, macros, pagos ni obligaciones. No apta para expedientes reales.')
