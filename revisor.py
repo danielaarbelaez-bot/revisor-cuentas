@@ -12,7 +12,7 @@ from docx import Document
 from pypdf import PdfReader
 from openpyxl import load_workbook
 
-st.title('Revisor de cuentas de cobro | Demostración V2')
+st.title('Revisor de cuentas de cobro | Demostración V3')
 st.warning('Solo para pruebas con datos ficticios. No cargue documentos institucionales ni datos personales reales.')
 
 MAX_FILE = 20 * 1024 * 1024
@@ -266,14 +266,40 @@ if st.button('Revisar cuenta automáticamente', type='primary', use_container_wi
     st.dataframe(tabla, hide_index=True, use_container_width=True)
     st.caption('Las alertas de privacidad son indicios, no pruebas concluyentes. No se verifican imágenes, escaneos, firmas ni datos ocultos de Excel.')
 
-    correo = 'Cordial saludo,\n\nDe acuerdo con la revisión preliminar realizada, agradezco verificar los siguientes puntos:\n\n'
-    for documento, grupo in tabla.groupby('Documento', sort=False):
-        correo += documento + '\n'
-        for _, fila in grupo.iterrows():
-            ubic = '' if fila['Ubicación'] == '—' else f" ({fila['Ubicación']})"
-            correo += f"- [{fila['Estado']}]{ubic} {fila['Observación']}\n"
-        correo += '\n'
-    correo += 'Quedo atenta al envío de los ajustes correspondientes.\n\nCordialmente,'
-    st.text_area('Borrador para Outlook', correo, height=280)
-    st.download_button('Descargar observaciones', correo, 'observaciones_demo_v2.txt', mime='text/plain')
+    # Solo los hallazgos confirmados y corregibles se incluyen en el correo.
+    # Alertas de privacidad, dudas y validaciones manuales quedan para revisión interna.
+    correcciones = tabla[tabla['Estado'].eq('Corregir')].copy()
+    pendientes = tabla[~tabla['Estado'].eq('Corregir')].copy()
+
+    st.subheader('Correcciones comprobadas para enviar a la contratista')
+    if correcciones.empty:
+        st.success('No se identificaron correcciones comprobadas en los campos que esta versión puede analizar. Esto no equivale a aprobar la cuenta.')
+    else:
+        st.dataframe(correcciones, hide_index=True, use_container_width=True)
+
+    st.subheader('Verificaciones internas (no incluir en el correo)')
+    if pendientes.empty:
+        st.info('No se generaron verificaciones internas adicionales.')
+    else:
+        st.dataframe(pendientes, hide_index=True, use_container_width=True)
+
+    correo = 'Cordial saludo,\n\n'
+    if correcciones.empty:
+        correo += ('En la revisión automática preliminar no se identificaron correcciones comprobadas '
+                   'para solicitar. La cuenta permanece pendiente de la revisión manual correspondiente.\n\n')
+    else:
+        correo += ('De acuerdo con la revisión realizada a la cuenta de cobro, '
+                   'solicito efectuar las siguientes correcciones identificadas en los documentos: '
+                   '\n\n')
+        for documento, grupo in correcciones.groupby('Documento', sort=False):
+            correo += documento + '\n'
+            for _, fila in grupo.iterrows():
+                ubic = '' if fila['Ubicación'] == '—' else f" ({fila['Ubicación']})"
+                correo += f"- {fila['Observación']}{ubic}\n"
+            correo += '\n'
+        correo += 'Agradezco remitir la documentación ajustada para continuar con el trámite.\n\n'
+    correo += 'Cordialmente,'
+    st.text_area('Correo único para Outlook — solo correcciones comprobadas', correo, height=280)
+    st.download_button('Descargar correo para Outlook', correo, 'correo_correcciones_demo_v3.txt', mime='text/plain')
+    st.caption('No se envían automáticamente correos. Las alertas de privacidad se excluyen del correo hasta confirmar que corresponden a datos personales que deben anonimizarse.')
     st.warning('Demostración: no certifica anonimización completa, firmas, macros, pagos, ni concordancia integral de obligaciones. No apta para expedientes reales.')
