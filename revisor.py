@@ -12,7 +12,7 @@ from docx import Document
 from pypdf import PdfReader
 from openpyxl import load_workbook
 
-st.title('Revisor de cuentas de cobro | Demostración V4')
+st.title('Revisor de cuentas de cobro | Revisión consolidada | Versión de entrega')
 st.warning('Solo para pruebas con datos ficticios. No cargue documentos institucionales ni datos personales reales.')
 
 MAX_FILE = 20 * 1024 * 1024
@@ -209,26 +209,80 @@ def f68_campos(datos):
 
 
 def f62_campos_bytes(contenido):
+    """Extrae solo campos de la tabla básica F62 V2, sin inferir datos."""
     try:
         doc = Document(io.BytesIO(contenido))
-        # Estructura basada en la tabla de información básica del formato F62 V2.
-        tabla = next((t for t in doc.tables if len(t.rows) > 13 and
-                       'INFORMACION BASICA' in normalizar(t.rows[0].cells[0].text)), None)
+        tabla = next((t for t in doc.tables if len(t.rows) >= 15 and
+                      'INFORMACION BASICA' in normalizar(t.rows[0].cells[0].text)), None)
         if tabla is None:
             return {}
         def dato(fila):
-            if len(tabla.rows) <= fila:
-                return None
             celdas = tabla.rows[fila].cells
             for c in celdas[4:]:
-                if c.text.strip():
-                    return c.text.strip()
+                v = c.text.strip()
+                if v:
+                    return v
             return None
+        seguridad = next((t for t in doc.tables if len(t.rows) > 4 and
+                          'CUMPLIMIENTO DE LAS OBLIGACIONES' in normalizar(t.rows[0].cells[0].text)), None)
+        aportes = {}
+        if seguridad:
+            for campo, fila in [('salud',2), ('pension',3), ('arl',4)]:
+                aportes[campo] = seguridad.rows[fila].cells[-1].text.strip()
         return {'contrato': dato(4), 'nombre': dato(5), 'cedula': dato(6),
                 'supervisor': dato(13), 'valor_total': dato(10),
-                'periodo_texto': dato(2)}
-    except Exception:
+                'periodo_texto': dato(2), **aportes}
+    except (ValueError, TypeError, IndexError, KeyError, OSError):
         return {}
+
+
+def numero_monetario(valor):
+    """Parsea importes de texto, nunca fórmulas ni valores ambiguos."""
+    if valor is None or isinstance(valor, bool):
+        return None
+    if isinstance(valor, (int,float)):
+        return round(float(valor),2)
+    texto = str(valor).strip()
+    if texto.startswith('=') or not re.fullmatch(r'[$\s\d.,]+', texto):
+        return None
+    texto = re.sub(r'[$\s]', '', texto)
+    if not texto:
+        return None
+    if ',' in texto and '.' in texto:
+        texto = texto.replace('.', '').replace(',', '.') if texto.rfind(',') > texto.rfind('.') else texto.replace(',', '')
+    elif ',' in texto:
+        texto = texto.replace(',', '.') if len(texto.split(',')[-1]) in (1,2) else texto.replace(',', '')
+    elif '.' in texto and len(texto.split('.')[-1]) == 3:
+        texto = texto.replace('.', '')
+    try:
+        return round(float(texto),2)
+    except ValueError:
+        return None
+
+
+def campo_valido(campo, valor):
+    if valor is None or es_marcador(valor):
+        return False
+    v = limpiar_campo(valor)
+    if re.search(r'#{2,}|\bEJEMPLO\b|\bFICTICI[OA]\b|\bPRUEBA\b', v):
+        return False
+    if campo == 'cedula':
+        return len(re.sub(r'\D','',str(valor))) >= 6
+    if campo == 'contrato':
+        return len(v) >= 5
+    if campo == 'nombre':
+        return len(v.split()) >= 2 and 'XXXXX' not in v
+    return bool(v)
+
+
+def periodos_en_texto(texto):
+    """Solo fechas explícitas dd/mm/aaaa, evita interpretar marcadores vacíos."""
+    fechas = []
+    for d,m,a in re.findall(r'(?<!\d)(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?!\d)', str(texto or '')):
+        f = fecha_partes(d,m,a)
+        if f:
+            fechas.append(f)
+    return fechas
 
 
 def cotejar_campos(nombre62, datos62, bytes62, nombre68, datos68, contratista, periodo, agregar):
@@ -240,7 +294,7 @@ def cotejar_campos(nombre62, datos62, bytes62, nombre68, datos68, contratista, p
     for campo, titulo in [('contrato','número de contrato'), ('nombre','nombre de la contratista'),
                           ('cedula','documento de identidad')]:
         va, vb = a.get(campo), b.get(campo)
-        if va and vb and not es_marcador(va) and not es_marcador(vb):
+        if campo_valido(campo, va) and campo_valido(campo, vb):
             if campo == 'cedula':
                 coinciden = re.sub(r'\D','',str(va)) == re.sub(r'\D','',str(vb))
             else:
@@ -262,9 +316,23 @@ def cotejar_campos(nombre62, datos62, bytes62, nombre68, datos68, contratista, p
                     'Formulario para pagos, fila 13')
     else:
         agregar(nombre68,'Revisión manual','No se pudo interpretar el período completo del F68 en la fila 13.')
-    periodo62 = normalizar(a.get('periodo_texto') or '')
-    if periodo62 and 'DEL' in periodo62 and not re.search(r'\b\d{1,2}\b',periodo62):
-        agregar(nombre62,'Revisión manual','El período del F62 no tiene fechas legibles para cotejar.', 'Información básica, período de reporte')
+    fechas62 = periodos_en_texto(a.get('periodo_texto'))
+    if len(fechas62) >= 2 and inicio and fin:
+        if fechas62[0] != inicio or fechas62[1] != fin:
+            agregar('Comparación F62–F68','Corregir',
+                    'Los períodos reportados en F62 y F68 son diferentes. Revisar las fechas de ambos informes y ajustar el documento que corresponda.',
+                    'F62: período de reporte / F68: fila 13')
+    else:
+        agregar('Comparación F62–F68','Revisión manual',
+                'No fue posible comparar las fechas del período del F62 con las del F68.',
+                'F62: período de reporte / F68: fila 13')
+    for campo, etiqueta in [('salud','salud'), ('pension','pensión'), ('arl','ARL')]:
+        x, y = numero_monetario(a.get(campo)), numero_monetario(b.get(campo))
+        if x is not None and y is not None and abs(x-y) > 1:
+            agregar('Comparación F62–F68','Corregir',
+                    f'El aporte de {etiqueta} del F62 no coincide con el registrado en el F68. Cotejar con la planilla pagada y corregir el formato equivocado.',
+                    f'F62: seguridad social / F68: {dict(salud="Z106", pension="Z108", arl="Z110")[campo]}')
+
     mes_ss = b.get('mes_seguridad')
     if mes_ss and normalizar(mes_ss) in MESES and MESES[normalizar(mes_ss)] != periodo.month:
         agregar(nombre68,'Corregir',
@@ -393,8 +461,8 @@ if st.button('Revisar cuenta automáticamente', type='primary', use_container_wi
 
     correo = 'Cordial saludo,\n\n'
     if correcciones.empty:
-        correo += ('En la revisión automática preliminar no se identificaron correcciones comprobadas '
-                   'para solicitar. La cuenta permanece pendiente de la revisión manual correspondiente.\n\n')
+        correo = ('No se generó un correo de correcciones porque no hay hallazgos comprobados. '
+                   'No enviar este texto a la contratista: completar las verificaciones internas antes de decidir.')
     else:
         correo += ('De acuerdo con la revisión realizada a la cuenta de cobro, '
                    'solicito efectuar las siguientes correcciones identificadas en los documentos: '
@@ -406,8 +474,9 @@ if st.button('Revisar cuenta automáticamente', type='primary', use_container_wi
                 correo += f"- {fila['Observación']}{ubic}\n"
             correo += '\n'
         correo += 'Agradezco remitir la documentación ajustada para continuar con el trámite.\n\n'
-    correo += 'Cordialmente,'
+    if not correcciones.empty:
+        correo += 'Cordialmente,'
     st.text_area('Correo único para Outlook — solo correcciones comprobadas', correo, height=280)
-    st.download_button('Descargar correo para Outlook', correo, 'correo_correcciones_demo_v4.txt', mime='text/plain')
+    st.download_button('Descargar correo para Outlook', correo, 'correo_correcciones.txt', mime='text/plain', disabled=correcciones.empty)
     st.caption('No se envían automáticamente correos. Las alertas de privacidad se excluyen del correo hasta confirmar que corresponden a datos personales que deben anonimizarse.')
-    st.warning('Demostración V4: coteja campos estructurados cuando se usan las plantillas oficiales. No certifica anonimización completa, firmas, macros, pagos ni obligaciones. No apta para expedientes reales.')
+    st.warning('Revisión consolidada | Versión de entrega: coteja campos estructurados cuando se usan las plantillas oficiales. No certifica anonimización completa, firmas, macros, pagos ni obligaciones. No apta para expedientes reales.')
